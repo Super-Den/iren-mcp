@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Айрен ITX MCP</title>
+  <desc id="desc">Blue square icon with an ITX mark</desc>
+  <rect width="128" height="128" rx="24" fill="#2457A6"/>
+  <path d="M25 35h78v14H25zM25 56h50v14H25zM25 77h66v14H25z" fill="#fff"/>
+  <circle cx="94" cy="63" r="13" fill="#8CB4FF"/>
+  <path d="M91 56h6v14h-6z" fill="#2457A6"/>
+</svg>

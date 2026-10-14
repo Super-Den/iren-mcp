@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "iren": {
+      "command": "python",
+      "args": ["${PLUGIN_ROOT}/iren_mcp_server.py", "--stdio"],
+      "cwd": "${PLUGIN_ROOT}"
+    }
+  }
+}

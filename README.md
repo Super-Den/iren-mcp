@@ -75,7 +75,28 @@ py iren_mcp_server.py build --itx path/to/test.itx --output path/to/repacked.itx
 }
 ```
 
-Расширенная схема для `match`, `order`, `classify`, формул, изображений, профилей и сценариев находится в [iren-test-creation/references/schema.md](iren-test-creation/references/schema.md). Правила подготовки содержательно качественных заданий находятся в [iren-test-creation/SKILL.md](iren-test-creation/SKILL.md).
+Расширенная схема для `match`, `order`, `classify`, формул, изображений, профилей и сценариев находится в [skills/iren-test-creation/references/schema.md](skills/iren-test-creation/references/schema.md). Правила подготовки содержательно качественных заданий находятся в [skills/iren-test-creation/SKILL.md](skills/iren-test-creation/SKILL.md).
+
+## Добавление в Codex как marketplace
+
+В репозитории уже есть Codex marketplace-манифест `.agents/plugins/marketplace.json`, portable-манифест `plugin.json`, compatibility-манифест `.codex-plugin/plugin.json` и MCP-конфигурации `mcp.json`/`.mcp.json`.
+
+После установки Codex CLI добавьте marketplace:
+
+```powershell
+codex plugin marketplace add Super-Den/iren-mcp --ref main
+codex plugin marketplace list
+```
+
+Затем перезапустите Codex/ChatGPT desktop, откройте Plugins Directory, выберите marketplace `Айрен MCP` и установите `Айрен ITX MCP`. Плагин является desktop/local-executor пакетом: сервер запускается локально командой `python`, поэтому на компьютере должен быть Python 3.8+.
+
+Если marketplace уже добавлен, обновите его:
+
+```powershell
+codex plugin marketplace upgrade iren-mcp-marketplace
+```
+
+Marketplace и plugin-манифесты нужны для установки в Codex. Сам `.gitignore` не является манифестом и не заменяет эти файлы.
 
 ## Юридические границы и атрибуция
 

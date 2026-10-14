@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "iren": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["${PLUGIN_ROOT}/iren_mcp_server.py", "--stdio"],
+      "cwd": "${PLUGIN_ROOT}"
+    }
+  }
+}
