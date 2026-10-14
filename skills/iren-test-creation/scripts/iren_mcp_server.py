@@ -29,7 +29,7 @@ import xml.etree.ElementTree as ET
 ITX_VERSION = "6"
 SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-06-18"}
 QUESTION_TYPES = {"select", "input", "match", "order", "classify"}
-__version__ = "0.1.0"
+__version__ = "0.1.2"
 MAX_XML_BYTES = 16 * 1024 * 1024
 MAX_MEMBER_BYTES = 20 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 100 * 1024 * 1024

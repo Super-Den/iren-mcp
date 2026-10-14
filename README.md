@@ -88,7 +88,7 @@ codex plugin marketplace add Super-Den/iren-mcp --ref main
 codex plugin marketplace list
 ```
 
-Затем перезапустите Codex/ChatGPT desktop, откройте Plugins Directory, выберите marketplace `Айрен MCP` и установите `Айрен ITX MCP`. Плагин является desktop/local-executor пакетом: сервер запускается локально командой `python`, поэтому на компьютере должен быть Python 3.8+.
+Затем перезапустите Codex/ChatGPT desktop, откройте Plugins Directory, выберите marketplace `Айрен MCP` и установите `Айрен ITX MCP`. Плагин является desktop/local-executor пакетом: в Windows сервер запускается локальным launcher `py`, поэтому на компьютере должен быть Python 3.8+. В Linux/macOS при необходимости замените `py` на `python3` в локальной MCP-конфигурации.
 
 Если marketplace уже добавлен, обновите его:
 

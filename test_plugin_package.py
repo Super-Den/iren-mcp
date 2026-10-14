@@ -13,11 +13,15 @@ class PluginPackageTests(unittest.TestCase):
     def test_portable_manifest_and_components(self):
         manifest = self.read_json("plugin.json")
         self.assertEqual(manifest["name"], "iren-mcp")
-        self.assertEqual(manifest["version"], "0.1.1")
+        self.assertEqual(manifest["version"], "0.1.2")
         self.assertTrue((ROOT / "mcp.json").is_file())
         self.assertTrue((ROOT / "assets/iren-mcp.svg").is_file())
         onboarding = manifest["extensions"]["com.openai"]["onboardingSkill"]
         self.assertTrue((ROOT / onboarding[2:]).is_file())
+        mcp = self.read_json(".mcp.json")
+        server = mcp["mcpServers"]["iren"]
+        self.assertEqual(server["command"], "py")
+        self.assertEqual(server["cwd"], "${PLUGIN_ROOT}")
 
     def test_marketplace_points_inside_repo(self):
         marketplace = self.read_json(".agents/plugins/marketplace.json")
