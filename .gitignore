@@ -1,0 +1,54 @@
+# Python caches and environments
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+ENV/
+.uv/
+
+# Test and build output
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Local generated previews and temporary files
+preview_*/
+*_html/
+tmp/
+temp/
+*.log
+
+# Editors and operating-system files
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+
+# Keep generated .itx test files trackable: they are project artifacts.
+
+# Local reference materials supplied for analysis; do not redistribute.
+/04-04.itx
+/test_demo2.itx
+/Страны.itx
+/Примеры сценариев.itx
+/Пневматические_и_гдравлические_приводы_и_системы_глава_1_и_2.itx
+/Пневмораспределители тест.itx
+/*.pdf

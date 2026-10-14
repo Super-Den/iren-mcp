@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "iren-mcp"
+version = "0.1.0"
+description = "Dependency-free MCP server for creating, validating, and previewing Айрен .itx tests"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Super-Den" }]
+keywords = ["mcp", "iren", "itx", "testing", "education"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Operating System :: OS Independent",
+]
+
+[project.scripts]
+iren-mcp = "iren_mcp_server:cli"
+
+[tool.setuptools]
+py-modules = ["iren_mcp_server"]
