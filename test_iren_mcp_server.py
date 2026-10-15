@@ -69,6 +69,24 @@ class ItxWorkflowTests(unittest.TestCase):
         names = {tool["name"] for tool in iren.TOOL_DEFS}
         self.assertEqual(names, {"create_test", "build_test", "validate_formulas", "validate_test", "render_html"})
 
+    def test_rejects_iren_incompatible_exponential_precision(self):
+        xml = b'''<?xml version="1.0" encoding="utf-8"?>
+<irenTest version="6"><section title="S"><questions>
+  <question type="input" tag="1" weight="1" enabled="true">
+    <content><text value="Q"/></content>
+    <patterns><pattern type="text" value="0.0002" quality="1.0000"
+      caseSensitive="false" spaces="normalize" numericAware="true"
+      wildcard="false" precision="1e-06"/></patterns>
+  </question>
+</questions></section></irenTest>'''
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "bad_precision.itx"
+            with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("test.xml", xml)
+            report = iren.validate_formulas(str(source))
+            self.assertFalse(report["valid"])
+            self.assertIn("invalid_pattern_precision", {item["code"] for item in report["findings"]})
+
 
 if __name__ == "__main__":
     unittest.main()

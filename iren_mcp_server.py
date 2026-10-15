@@ -396,19 +396,30 @@ def validate_formulas(source: str) -> Dict[str, Any]:
             val = p.get("value", "")
             if not val.strip():
                 fs.append(finding("error", "empty_pattern", "Пустой эталон ответа.", locp))
+            pattern_type = p.get("type", "")
+            if pattern_type not in {"text", "regexp"}:
+                fs.append(finding("error", "invalid_pattern_type", "Атрибут type должен быть text или regexp.", locp))
             for attr in ("caseSensitive", "numericAware", "wildcard"):
                 if attr in p.attrib and as_bool(p.get(attr)) is None:
                     fs.append(finding("error", "invalid_pattern_boolean", "Атрибут %s должен быть true/false." % attr, locp))
-            for attr in ("quality", "precision"):
-                if attr in p.attrib:
+            quality = p.get("quality")
+            if quality is None or not re.fullmatch(r"[0-9]\.[0-9]{4}", quality) or not 0 <= float(quality) <= 1:
+                fs.append(finding("error", "invalid_pattern_quality", "Атрибут quality должен иметь вид 0.0000 и находиться в диапазоне от 0 до 1.", locp))
+            if pattern_type == "text" and as_bool(p.get("numericAware")) is True:
+                precision = p.get("precision")
+                # Айрен принимает только десятичную запись из цифр и точки;
+                # экспоненциальная форма вроде 1e-06 приводит к ошибке открытия.
+                if precision is None or len(precision) > 10 or not re.fullmatch(r"[0-9.]+", precision):
+                    fs.append(finding("error", "invalid_pattern_precision", "Для numericAware-шаблона precision должна быть десятичной строкой из цифр и точки длиной не более 10 символов.", locp))
+                else:
                     try:
-                        number = float(p.get(attr, ""))
-                        if attr == "quality" and not 0 <= number <= 1:
-                            raise ValueError()
-                        if attr == "precision" and number < 0:
-                            raise ValueError()
+                        float(precision)
                     except ValueError:
-                        fs.append(finding("error", "invalid_pattern_number", "Атрибут %s имеет недопустимое числовое значение." % attr, locp))
+                        fs.append(finding("error", "invalid_pattern_precision", "Атрибут precision имеет недопустимое десятичное значение.", locp))
+            spaces = p.get("spaces")
+            allowed_spaces = {"normalize", "ignore"} if pattern_type == "text" else {"exact", "normalize", "ignore"}
+            if spaces not in allowed_spaces:
+                fs.append(finding("error", "invalid_pattern_spaces", "Недопустимое значение spaces для данного типа шаблона.", locp))
         # Detect malformed placeholders separately from valid markers.
         for e in q.findall(".//text") + q.findall(".//pattern"):
             value = e.get("value", "")
