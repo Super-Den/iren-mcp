@@ -4,17 +4,22 @@
 
 Проект работает без сторонних Python-зависимостей и поддерживает Python 3.8+. MCP-сервер использует стандартный `stdio`-транспорт: клиент запускает Python-процесс и обменивается с ним JSON-RPC сообщениями по `stdin`/`stdout`.
 
+На Windows сначала используйте `py`; если launcher не настроен, укажите полный путь к `python.exe` или запускайте команды через `uv run --no-project python`.
+
 ## Возможности
 
 - создание и сборка `.itx` из JSON-спецификации;
 - перепаковка существующего теста с сохранением `test.xml` и изображений;
+- `test_info` — дерево секций, профили, теги, картинки, формулы, сценарии и ответы для авторской сверки;
+- `unpack_test` — безопасная распаковка только разрешённых членов `.itx` (`test.xml`, `images/*.png|*.jpg` и связанные `images/*.dat`);
 - структурная проверка ZIP/XML, вопросов, ответов, тегов, профилей и изображений;
 - статическая проверка inline-формул, эталонов, маркеров `$(variable)` и Pascal-подобных сценариев;
 - автономный HTML-предпросмотр всех вопросов, изображений и заявленных правильных ответов;
+- `open_in_iren` — после успешной проверки открыть `.itx` через ассоциацию установленной Айрен в Windows;
 - безопасная обработка архивов: запрет traversal-путей, symlink, DTD/entities, неизвестных ZIP-файлов и чрезмерных размеров;
 - CLI для локальной автоматизации.
 
-Проверка сценариев и формул статическая. Она выявляет распространённые ошибки структуры и связности, но не заменяет выполнение сценария в редакторе Айрен и предметную проверку правильности ответа по источнику.
+Проверка сценариев и формул в основном статическая: она проверяет ограничения формата Айрен, баланс конструкций, объявления переменных, маркеры и числовые шаблоны. Она не выполняет случайный Pascal-код и не доказывает предметную правильность ответа. Для формул доступна дополнительная ручная проверка через HTML/редактор Айрен; внешний MathJax-рендерер не встраивается в стандартную Python-only установку.
 
 ## Запуск MCP
 
@@ -36,13 +41,16 @@ py "C:\AI Projects\MCP для тестов\iren_mcp_server.py" --stdio
 }
 ```
 
-Сервер предоставляет инструменты `create_test`, `build_test`, `validate_formulas`, `validate_test` и `render_html`.
+Сервер предоставляет инструменты `create_test`, `build_test`, `test_info`, `unpack_test`, `validate_formulas`, `validate_test`, `render_html` и `open_in_iren`.
 
 ## CLI
 
 ```powershell
 py iren_mcp_server.py validate --itx path/to/test.itx
+py iren_mcp_server.py validate --itx path/to/test.itx --check-near-dups
 py iren_mcp_server.py validate-formulas --itx path/to/test.itx
+py iren_mcp_server.py info --itx path/to/test.itx --answers
+py iren_mcp_server.py unpack --itx path/to/test.itx --output path/to/unpacked
 py iren_mcp_server.py render --itx path/to/test.itx --output path/to/preview --overwrite
 py iren_mcp_server.py create --spec path/to/spec.json --output path/to/new.itx
 py iren_mcp_server.py build --itx path/to/test.itx --output path/to/repacked.itx
@@ -98,6 +106,8 @@ codex plugin marketplace upgrade iren-mcp-marketplace
 
 Marketplace и plugin-манифесты нужны для установки в Codex. Сам `.gitignore` не является манифестом и не заменяет эти файлы.
 
+`open_in_iren` запускает только уже выбранный локальный `.itx` через системную ассоциацию и принимает файл после `validate_test`. Публичного стабильного API редактора Айрен нет: его локальный WebSocket/Protobuf companion-протокол требует ephemeral editor key и зависит от версии, поэтому MCP не подключается к нему напрямую и не принимает произвольные команды ОС.
+
 ## Юридические границы и атрибуция
 
 Это независимый инструмент для работы с форматом тестов Айрен. «Айрен» и связанные материалы принадлежат их правообладателям; проект не заявляет аффилированность с автором Айрен Сергеем Останиным.
@@ -114,7 +124,7 @@ Marketplace и plugin-манифесты нужны для установки в
 
 ```powershell
 py -m unittest discover -s . -p "test_*.py" -v
-py -m py_compile iren_mcp_server.py
+py -m py_compile iren_mcp_server.py skills/iren-test-creation/scripts/iren_mcp_server.py
 ```
 
 MCP соблюдает stdio-правила: stdout содержит только JSON-RPC сообщения, а диагностические ошибки возвращаются как MCP tool results с `isError: true`.

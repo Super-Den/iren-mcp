@@ -1,6 +1,6 @@
 {
   "name": "iren-mcp",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Create, validate, assemble, and preview Айрен .itx tests with a local MCP server.",
   "author": {
     "name": "Super-Den",
@@ -16,13 +16,15 @@
   "interface": {
     "displayName": "Айрен ITX MCP",
     "shortDescription": "Создание и проверка .itx",
-    "longDescription": "Локальный MCP-сервер для создания, сборки, проверки XML, формул и сценариев Айрен, а также генерации HTML-предпросмотра. Требует Python 3.8+ и работает без сторонних Python-зависимостей.",
+    "longDescription": "Локальный MCP-сервер для создания, сводки, безопасной распаковки, сборки, проверки XML, формул и сценариев Айрен, HTML-предпросмотра и открытия валидного файла в Windows. Требует Python 3.8+ и работает без сторонних Python-зависимостей.",
     "developerName": "Super-Den",
     "category": "Developer Tools",
     "capabilities": [
       "Create Айрен .itx tests",
+      "Inspect and safely unpack tests",
       "Validate tests and scenarios",
-      "Generate HTML previews"
+      "Generate HTML previews",
+      "Open validated tests in Windows Айрен"
     ],
     "websiteURL": "https://github.com/Super-Den/iren-mcp",
     "supportURL": "https://github.com/Super-Den/iren-mcp/issues",

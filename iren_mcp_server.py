@@ -4,8 +4,8 @@
 
 The server deliberately uses the MCP JSON-RPC stdio transport directly.  This
 keeps the tool usable on a clean Python installation; no third-party package
-is required.  It implements the four operations needed when authoring a test:
-create/assemble, formula validation, full validation, and static HTML preview.
+is required.  It implements creation, safe inspection/unpacking, validation,
+preview, and optional local opening through the Ayren file association.
 """
 
 from __future__ import annotations
@@ -29,14 +29,28 @@ import xml.etree.ElementTree as ET
 ITX_VERSION = "6"
 SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-06-18"}
 QUESTION_TYPES = {"select", "input", "match", "order", "classify"}
-__version__ = "0.1.2"
+__version__ = "0.1.4"
 MAX_XML_BYTES = 16 * 1024 * 1024
 MAX_MEMBER_BYTES = 20 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 100 * 1024 * 1024
 MAX_MEMBERS = 2000
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
+IMAGE_EXTENSIONS = {".png", ".jpg"}
+DATA_EXTENSION = ".dat"
+MAX_IMAGE_PIXELS = 20_000_000
 PLACEHOLDER_RE = re.compile(r"\$\(([A-Za-z_][A-Za-z0-9_]*)\)")
 IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def levenshtein(a: str, b: str, cap: int = 3) -> int:
+    if abs(len(a) - len(b)) > cap:
+        return cap + 1
+    previous = list(range(len(b) + 1))
+    for i, left in enumerate(a, 1):
+        current = [i]
+        for j, right in enumerate(b, 1):
+            current.append(min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (left != right)))
+        previous = current
+    return previous[-1]
 
 
 @dataclass
@@ -122,7 +136,13 @@ def safe_archive_path(value: str) -> Optional[str]:
 
 def safe_image_path(value: str) -> Optional[str]:
     safe = safe_archive_path(value)
-    return safe if safe and safe.startswith("images/") and PurePosixPath(safe).suffix.lower() in IMAGE_EXTENSIONS else None
+    return safe if safe and safe.startswith("images/") and PurePosixPath(safe).suffix in IMAGE_EXTENSIONS else None
+
+
+def safe_data_path(value: str) -> Optional[str]:
+    """Return a safe Ayren clipboard/source-data member path."""
+    safe = safe_archive_path(value)
+    return safe if safe and safe.startswith("images/") and PurePosixPath(safe).suffix.lower() == DATA_EXTENSION else None
 
 
 def checked_write_path(path: Path, overwrite: bool = False) -> None:
@@ -149,10 +169,19 @@ def read_itx(source: str) -> Tuple[Path, bytes, Dict[str, bytes]]:
         # A directory may also contain private files. Only referenced raster
         # images are collected, never arbitrary neighbouring documents/secrets.
         root = parse_xml(files["test.xml"])
+        referenced = []
         for img in root.findall(".//img"):
             name = safe_image_path(img.get("src", ""))
             if not name:
                 raise ItxError("Недопустимый путь изображения")
+            referenced.append(name)
+            clipboard = img.get("clipboardData")
+            if clipboard is not None:
+                data_name = safe_data_path(clipboard)
+                if not data_name:
+                    raise ItxError("Недопустимый путь исходных данных изображения")
+                referenced.append(data_name)
+        for name in referenced:
             f = path / name
             if not f.exists():
                 continue  # validator reports missing references
@@ -181,7 +210,7 @@ def read_itx(source: str) -> Tuple[Path, bytes, Dict[str, bytes]]:
                 if name.casefold() in seen:
                     raise ItxError("Повторяющееся имя ZIP member: %r" % name)
                 seen.add(name.casefold())
-                if name != "test.xml" and not safe_image_path(name):
+                if name != "test.xml" and not (safe_image_path(name) or safe_data_path(name)):
                     raise ItxError("Неподдерживаемый ZIP member: %r" % name)
                 limit = MAX_XML_BYTES if name == "test.xml" else MAX_MEMBER_BYTES
                 if info.file_size > limit:
@@ -383,6 +412,8 @@ def validate_formulas(source: str) -> Dict[str, Any]:
             val = f.get("source", "")
             if not val.strip():
                 fs.append(finding("error", "empty_formula", "Пустой атрибут formula/@source.", loc))
+            if len(val) > 1000:
+                fs.append(finding("error", "formula_too_long", "Айрен ограничивает inline-формулу 1000 символами.", loc))
             if any(ord(ch) < 32 and ch not in "\r\n\t" for ch in val):
                 fs.append(finding("error", "formula_control_character", "Формула содержит управляющий символ.", loc))
             # Catch obvious unbalanced delimiters without imposing a TeX dialect.
@@ -467,24 +498,210 @@ def _validate_profiles(root: ET.Element, fs: List[Finding]) -> None:
                     fs.append(finding("error", "invalid_duration", "durationMinutes должен быть unlimited или неотрицательным числом.", loc))
         bounds: List[float] = []
         for mark in profile.findall("./markScale/marks/mark"):
-            try:
-                b = float(mark.get("lowerBound", ""))
-                if not 0 <= b <= 1:
-                    raise ValueError()
-                bounds.append(b)
-            except ValueError:
-                fs.append(finding("error", "invalid_mark_bound", "lowerBound должен лежать в диапазоне 0..1.", loc))
+            raw_bound = mark.get("lowerBound", "")
+            if not re.fullmatch(r"(?:0\.[0-9]{4}|1\.0000)", raw_bound):
+                fs.append(finding("error", "invalid_mark_bound", "lowerBound должен иметь вид 0.0000..0.9999 или 1.0000.", loc))
+            else:
+                bounds.append(float(raw_bound))
+        if bounds and bounds[0] != 0:
+            fs.append(finding("error", "mark_scale_must_start_at_zero", "Первая граница шкалы оценок должна быть 0.0000.", loc))
         if bounds != sorted(bounds) or len(set(bounds)) != len(bounds):
             fs.append(finding("error", "marks_not_increasing", "Границы шкалы оценок должны возрастать.", loc))
         for sp in profile.findall(".//sectionProfile"):
             value = sp.get("questions")
             if value and value != "all":
-                m = re.fullmatch(r"(\d+(?:\.\d+)?)%", value)
-                if not m or not 0 < float(m.group(1)) <= 100:
-                    fs.append(finding("error", "invalid_section_percentage", "questions в sectionProfile должен быть процентом 0..100 или all.", loc))
+                integer = re.fullmatch(r"\d+", value)
+                percent = re.fullmatch(r"(\d+(?:\.\d+)?)%", value)
+                if integer:
+                    if not 0 <= int(value) <= 999:
+                        fs.append(finding("error", "invalid_section_questions", "questions в sectionProfile должен быть целым числом 0..999.", loc))
+                elif not percent or not 0 <= float(percent.group(1)) <= 100:
+                    fs.append(finding("error", "invalid_section_questions", "questions в sectionProfile должен быть целым числом 0..999, процентом 0..100% или all.", loc))
 
 
-def validate_test(source: str) -> Dict[str, Any]:
+def _section_children(section: ET.Element) -> List[ET.Element]:
+    container = section.find("sections")
+    return container.findall("section") if container is not None else []
+
+
+def _section_profile_mismatches(section: ET.Element, profile: ET.Element, location: str) -> List[Finding]:
+    findings: List[Finding] = []
+    if profile.get("title") != section.get("title"):
+        findings.append(finding("error", "section_profile_name_mismatch", "Название sectionProfile должно совпадать с названием section.", location))
+    children = _section_children(section)
+    profiles = profile.find("sectionProfiles")
+    profile_children = profiles.findall("sectionProfile") if profiles is not None else []
+    if len(children) != len(profile_children):
+        findings.append(finding("error", "section_profile_tree_mismatch", "Число вложенных sectionProfile должно совпадать с числом вложенных section.", location))
+    for child, child_profile in zip(children, profile_children):
+        findings.extend(_section_profile_mismatches(child, child_profile, location))
+    return findings
+
+
+def _validate_profile_source_constraints(root: ET.Element, fs: List[Finding]) -> None:
+    sections = root.findall("./section")
+    for profile in root.findall("./profiles/profile"):
+        loc = "profile %r" % profile.get("title", "")
+        selection = profile.find("questionSelection")
+        section_profile = profile.find("sectionProfile")
+        if selection is None:
+            continue
+        has_qps = "questionsPerSection" in selection.attrib
+        if section_profile is None and not has_qps:
+            fs.append(finding("error", "missing_questions_per_section", "Без sectionProfile профиль должен содержать questionsPerSection.", loc))
+        if section_profile is not None and has_qps:
+            fs.append(finding("error", "conflicting_profile_selection", "Профиль не может одновременно содержать sectionProfile и questionsPerSection.", loc))
+        if has_qps:
+            value = selection.get("questionsPerSection", "")
+            if value != "all":
+                try:
+                    if int(value) < 1:
+                        raise ValueError()
+                except ValueError:
+                    fs.append(finding("error", "invalid_questions_per_section", "questionsPerSection должен быть all или положительным целым числом.", loc))
+        session = profile.find("sessionOptions")
+        if session is None:
+            fs.append(finding("error", "missing_session_options", "Профиль должен содержать sessionOptions.", loc))
+        else:
+            required = ("durationMinutes", "editableAnswers", "browsableQuestions", "weightCues")
+            for attr in required:
+                if attr not in session.attrib:
+                    fs.append(finding("error", "missing_session_attribute", "В sessionOptions отсутствует обязательный атрибут %s." % attr, loc))
+            duration = session.get("durationMinutes")
+            if duration not in (None, "unlimited"):
+                try:
+                    if int(duration) < 1:
+                        raise ValueError()
+                except ValueError:
+                    fs.append(finding("error", "invalid_duration", "durationMinutes должен быть unlimited или положительным целым числом.", loc))
+            for attr in ("editableAnswers", "browsableQuestions", "weightCues"):
+                if attr in session.attrib and as_bool(session.get(attr)) is None:
+                    fs.append(finding("error", "invalid_session_boolean", "Атрибут %s должен быть true/false." % attr, loc))
+        if section_profile is not None and sections:
+            fs.extend(_section_profile_mismatches(sections[0], section_profile, loc))
+
+
+def _png_dimensions(data: bytes) -> Optional[Tuple[int, int]]:
+    signature = b"\x89PNG\r\n\x1a\n"
+    if len(data) < 24 or data[:8] != signature or data[12:16] != b"IHDR":
+        return None
+    width = int.from_bytes(data[16:20], "big")
+    height = int.from_bytes(data[20:24], "big")
+    if width <= 0 or height <= 0 or width * height > MAX_IMAGE_PIXELS:
+        return None
+    return width, height
+
+
+def _png_is_uniform(data: bytes) -> Optional[bool]:
+    """Best-effort blank/solid PNG check with a decompression-pixel limit."""
+    try:
+        if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n":
+            return None
+        width, height = _png_dimensions(data) or (0, 0)
+        if not width or not height:
+            return None
+        bit_depth, color_type, interlace = data[24], data[25], data[28]
+        if bit_depth != 8 or interlace != 0 or color_type not in (0, 2, 3, 4, 6):
+            return None
+        channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[color_type]
+        palette: Optional[bytes] = None
+        compressed = bytearray()
+        pos = 8
+        while pos + 12 <= len(data):
+            length = int.from_bytes(data[pos:pos + 4], "big")
+            kind = data[pos + 4:pos + 8]
+            body_start = pos + 8
+            body_end = body_start + length
+            if body_end + 4 > len(data):
+                return None
+            body = data[body_start:body_end]
+            pos = body_end + 4
+            if kind == b"PLTE":
+                palette = body
+            elif kind == b"IDAT":
+                compressed.extend(body)
+            elif kind == b"IEND":
+                break
+        import zlib
+        raw = zlib.decompress(bytes(compressed))
+        stride = width * channels
+        if len(raw) != (stride + 1) * height:
+            return None
+        previous = bytearray(stride)
+        first: Optional[bytes] = None
+        for row in range(height):
+            offset = row * (stride + 1)
+            filter_type = raw[offset]
+            line = bytearray(raw[offset + 1:offset + 1 + stride])
+            for i in range(stride):
+                left = line[i - channels] if i >= channels else 0
+                up = previous[i]
+                upper_left = previous[i - channels] if i >= channels else 0
+                if filter_type == 1:
+                    line[i] = (line[i] + left) & 255
+                elif filter_type == 2:
+                    line[i] = (line[i] + up) & 255
+                elif filter_type == 3:
+                    line[i] = (line[i] + ((left + up) // 2)) & 255
+                elif filter_type == 4:
+                    estimate = left + up - upper_left
+                    pa, pb, pc = abs(estimate - left), abs(estimate - up), abs(estimate - upper_left)
+                    predictor = left if pa <= pb and pa <= pc else (up if pb <= pc else upper_left)
+                    line[i] = (line[i] + predictor) & 255
+                elif filter_type != 0:
+                    return None
+            previous = line
+            for col in range(width):
+                pixel = bytes(line[col * channels:(col + 1) * channels])
+                if color_type == 3:
+                    index = pixel[0] * 3
+                    pixel = palette[index:index + 3] if palette and index + 3 <= len(palette) else b"\x00\x00\x00"
+                elif color_type in (0, 4):
+                    pixel = bytes([pixel[0]] * 3)
+                if first is None:
+                    first = pixel
+                elif pixel != first:
+                    return False
+        return True
+    except Exception:
+        return None
+
+
+def _validate_images(root: ET.Element, files: Dict[str, bytes], fs: List[Finding]) -> Dict[str, Dict[str, Any]]:
+    stats: Dict[str, Dict[str, Any]] = {}
+    parent = {child: parent for parent in root.iter() for child in parent}
+    answer_tags = {"choice", "baseItem", "matchingItem", "distractor", "sequenceItem", "categoryItem"}
+    for image in root.findall(".//img"):
+        src = image.get("src", "")
+        if src in stats or src not in files:
+            continue
+        data = files[src]
+        record: Dict[str, Any] = {"bytes": len(data)}
+        dims = _png_dimensions(data) if src.lower().endswith(".png") else None
+        if dims:
+            record["width"], record["height"] = dims
+            ancestors: List[str] = []
+            node = parent.get(image)
+            while node is not None:
+                ancestors.append(node.tag)
+                node = parent.get(node)
+            in_answer = bool(set(ancestors) & answer_tags)
+            max_w, max_h = (1200, 300) if in_answer else (1200, 400)
+            if dims[0] < 24 or dims[1] < 24:
+                fs.append(finding("warning", "image_too_small", "Изображение меньше рекомендуемого минимума 24x24.", src))
+            if dims[0] > max_w or dims[1] > max_h:
+                fs.append(finding("warning", "image_too_large", "Изображение превышает рекомендуемый размер для Айрен (%dx%d)." % (max_w, max_h), src))
+            uniform = _png_is_uniform(data)
+            if uniform:
+                fs.append(finding("warning", "image_uniform", "PNG однороден и может быть пустым или нечитаемым.", src))
+                record["uniform"] = True
+        if not src.startswith("images/") or any(ord(ch) > 127 for ch in src):
+            fs.append(finding("warning", "image_name_quality", "Для переносимости используйте ASCII-путь images/filename.png или images/filename.jpg.", src))
+        stats[src] = record
+    return stats
+
+
+def validate_test(source: str, check_near_dups: bool = False) -> Dict[str, Any]:
     path, xml_bytes, files = read_itx(source)
     root = parse_xml(xml_bytes)
     fs: List[Finding] = []
@@ -494,9 +711,23 @@ def validate_test(source: str) -> Dict[str, Any]:
         fs.append(finding("error", "unsupported_version", "Ожидается irenTest version=\"6\"."))
     if not root.findall("./section"):
         fs.append(finding("error", "no_sections", "В тесте нет корневого section."))
-    tags: Set[int] = set()
+    for section in root.findall(".//section"):
+        if len(section.get("title", "")) > 100:
+            fs.append(finding("error", "section_title_too_long", "Название section не должно превышать 100 символов.", section.get("title", "")))
+    tags: Set[str] = set()
     max_tag = 0
     referenced_images: Set[str] = set()
+    referenced_data: Set[str] = set()
+    parent = {child: parent for parent in root.iter() for child in parent}
+
+    def inherited_modifier(q: ET.Element, modifier_type: str) -> bool:
+        node = q
+        while node is not None:
+            if node.tag in {"question", "section", "profile"}:
+                if any(m.get("type") == modifier_type for m in node.findall("./modifiers/modifier")):
+                    return True
+            node = parent.get(node)
+        return False
     for img in root.findall(".//img"):
         src = img.get("src", "")
         safe = safe_image_path(src)
@@ -504,6 +735,13 @@ def validate_test(source: str) -> Dict[str, Any]:
             fs.append(finding("error", "unsafe_image_path", "Небезопасный путь изображения: %r." % src))
         else:
             referenced_images.add(safe)
+        clipboard = img.get("clipboardData")
+        if clipboard is not None:
+            safe_data = safe_data_path(clipboard)
+            if not safe_data:
+                fs.append(finding("error", "unsafe_clipboard_data_path", "Небезопасный путь исходных данных изображения: %r." % clipboard))
+            else:
+                referenced_data.add(safe_data)
     for q in all_question_nodes(root):
         loc = question_location(q)
         _required_content(q, fs)
@@ -511,47 +749,65 @@ def validate_test(source: str) -> Dict[str, Any]:
         if qtype not in QUESTION_TYPES:
             fs.append(finding("error", "unknown_question_type", "Неизвестный тип вопроса: %s." % qtype, loc))
         tag = q.get("tag")
-        try:
-            ti = int(tag or "")
-            if ti <= 0:
-                raise ValueError()
-            if ti in tags:
-                fs.append(finding("error", "duplicate_tag", "Тег вопроса повторяется: %s." % ti, loc))
-            tags.add(ti)
-            max_tag = max(max_tag, ti)
-        except ValueError:
-            fs.append(finding("error", "invalid_tag", "tag должен быть положительным целым числом.", loc))
-        if as_bool(q.get("enabled"), True) is None:
+        if tag is not None and tag != "":
+            if not all(ch.isalnum() or ch == "_" for ch in tag):
+                fs.append(finding("error", "invalid_tag", "tag должен содержать только буквы, цифры и _.", loc))
+            if tag in tags:
+                fs.append(finding("error", "duplicate_tag", "Тег вопроса повторяется: %s." % tag, loc))
+            tags.add(tag)
+            if tag.isdigit():
+                max_tag = max(max_tag, int(tag))
+        if q.get("enabled") is None:
+            fs.append(finding("error", "missing_enabled", "У вопроса отсутствует обязательный атрибут enabled.", loc))
+        elif as_bool(q.get("enabled"), None) is None:
             fs.append(finding("error", "invalid_enabled", "enabled должен быть true/false.", loc))
         try:
-            if float(q.get("weight", "1")) <= 0:
+            weight_text = q.get("weight", "")
+            if not re.fullmatch(r"[0-9]+", weight_text) or not 1 <= int(weight_text) <= 1000:
                 raise ValueError()
         except ValueError:
-            fs.append(finding("error", "invalid_weight", "weight должен быть положительным числом.", loc))
+            fs.append(finding("error", "invalid_weight", "weight должен быть целым числом от 1 до 1000.", loc))
         if qtype == "select":
             choices = q.findall("./choices/choice")
             if len(choices) < 2:
                 fs.append(finding("error", "too_few_choices", "Select-вопрос должен содержать не менее двух вариантов.", loc))
+            if len(choices) > 20:
+                fs.append(finding("error", "too_many_choices", "Select-вопрос не может содержать более 20 вариантов.", loc))
             correct = [c for c in choices if as_bool(c.get("correct"), False)]
             modifiers = {m.get("type") for m in q.findall("./modifiers/modifier")}
-            if not correct and "addNegativeChoice" not in modifiers:
-                fs.append(finding("error", "no_correct_choice", "Нет правильного варианта ответа.", loc))
+            enabled = as_bool(q.get("enabled"), True)
+            if not correct and "addNegativeChoice" not in modifiers and not inherited_modifier(q, "addNegativeChoice"):
+                severity = "error" if enabled is not False else "warning"
+                fs.append(finding(severity, "no_correct_choice", "Нет правильного варианта ответа.", loc))
             texts = [content_text(c.find("content")).strip() for c in choices]
             if any(not t for t in texts):
                 fs.append(finding("error", "empty_choice", "Вариант ответа пуст.", loc))
             if len(texts) != len(set(texts)):
                 fs.append(finding("warning", "duplicate_choice", "Есть одинаковые варианты ответа; это делает выбор неоднозначным.", loc))
+            if check_near_dups:
+                for left in range(len(texts)):
+                    for right in range(left + 1, len(texts)):
+                        if texts[left] and texts[right] and texts[left] != texts[right] and levenshtein(texts[left].lower(), texts[right].lower(), cap=2) <= 2:
+                            fs.append(finding("warning", "near_duplicate_choice", "Варианты ответа отличаются на 1–2 символа; проверьте, не является ли это опечаткой.", loc))
             for c in choices:
                 for attr in ("correct", "fixed", "negative"):
                     if as_bool(c.get(attr), None) is None:
                         fs.append(finding("error", "invalid_choice_boolean", "Атрибут %s должен быть true/false." % attr, loc))
         elif qtype == "input":
-            if not q.findall("./patterns/pattern"):
+            patterns = q.findall("./patterns/pattern")
+            if not patterns:
                 fs.append(finding("error", "no_patterns", "Input-вопрос должен содержать patterns/pattern.", loc))
+            if len(patterns) > 20:
+                fs.append(finding("error", "too_many_patterns", "Input-вопрос не может содержать более 20 шаблонов.", loc))
+            for pattern in patterns:
+                if len(pattern.get("value", "")) > 200:
+                    fs.append(finding("error", "pattern_too_long", "Эталон input-ответа не может превышать 200 символов.", loc))
         elif qtype == "match":
             pairs = q.findall("./pairs/pair")
             if len(pairs) < 2:
                 fs.append(finding("error", "too_few_pairs", "Match-вопрос должен содержать не менее двух пар.", loc))
+            if len(pairs) + len(q.findall("./distractors/distractor")) > 50:
+                fs.append(finding("error", "too_many_match_rows", "Match-вопрос не может содержать более 50 строк.", loc))
             bases = [content_text(p.find("baseItem/content")).strip() for p in pairs]
             matches = [content_text(p.find("matchingItem/content")).strip() for p in pairs]
             if any(not x for x in bases + matches):
@@ -563,6 +819,8 @@ def validate_test(source: str) -> Dict[str, Any]:
             dis = [content_text(x.find("content")).strip() for x in q.findall("./distractors/distractor")]
             if len(seq) < 2:
                 fs.append(finding("error", "too_few_sequence_items", "Order-вопрос должен содержать не менее двух элементов.", loc))
+            if len(seq) + len(dis) > 50:
+                fs.append(finding("error", "too_many_order_items", "Order-вопрос не может содержать более 50 элементов.", loc))
             if any(not x for x in seq + dis):
                 fs.append(finding("error", "empty_sequence_item", "Элемент последовательности не может быть пустым.", loc))
             if len(seq) != len(set(seq)) or set(seq) & set(dis) or len(dis) != len(set(dis)):
@@ -571,8 +829,12 @@ def validate_test(source: str) -> Dict[str, Any]:
             cats = q.findall("./categories/category")
             if len(cats) < 2:
                 fs.append(finding("error", "too_few_categories", "Classify-вопрос должен содержать не менее двух категорий.", loc))
+            if len(cats) > 10:
+                fs.append(finding("error", "too_many_categories", "Classify-вопрос не может содержать более 10 категорий.", loc))
             titles = [content_text(c.find("categoryTitle/content")).strip() for c in cats]
             items = [content_text(i.find("content")).strip() for c in cats for i in c.findall("./categoryItems/categoryItem")]
+            if len(items) > 100:
+                fs.append(finding("error", "too_many_classify_items", "Classify-вопрос не может содержать более 100 элементов.", loc))
             if any(not x for x in titles):
                 fs.append(finding("error", "empty_category_title", "Название категории не может быть пустым.", loc))
             if any(not x for x in items):
@@ -582,6 +844,10 @@ def validate_test(source: str) -> Dict[str, Any]:
     for image in sorted(referenced_images):
         if image not in files:
             fs.append(finding("error", "missing_image", "Изображение, указанное в XML, отсутствует в архиве: %s." % image))
+    for data_path in sorted(referenced_data):
+        if data_path not in files:
+            fs.append(finding("error", "missing_clipboard_data", "Исходные данные изображения отсутствуют в архиве: %s." % data_path))
+    image_stats = _validate_images(root, files, fs)
     try:
         last_tag = int(root.findtext("./testInfo/@lastGeneratedTag"))  # type: ignore[arg-type]
     except Exception:
@@ -595,6 +861,7 @@ def validate_test(source: str) -> Dict[str, Any]:
     elif last_tag < max_tag:
         fs.append(finding("error", "stale_last_generated_tag", "lastGeneratedTag меньше максимального тега вопроса."))
     _validate_profiles(root, fs)
+    _validate_profile_source_constraints(root, fs)
     formula_report = validate_formulas(str(path))
     # Do not duplicate formula findings in full report; retain them under a separate field.
     errors = [x for x in fs if x.severity == "error"]
@@ -603,7 +870,9 @@ def validate_test(source: str) -> Dict[str, Any]:
         "valid": not errors and formula_report["valid"],
         "questionCount": len(list(all_question_nodes(root))),
         "questionTypes": {t: sum(1 for q in all_question_nodes(root) if q.get("type") == t) for t in sorted(QUESTION_TYPES)},
-        "imageCount": len([n for n in files if n.startswith("images/") and not n.endswith("/")]),
+        "imageCount": len([n for n in files if safe_image_path(n)]),
+        "imageStats": image_stats,
+        "nearDuplicateCheck": check_near_dups,
         "findings": [x.as_dict() for x in fs],
         "formulaValidation": formula_report,
     }
@@ -643,7 +912,22 @@ def add_content(parent: ET.Element, value: Any) -> ET.Element:
 
 
 def _bool(v: Any, default: bool = False) -> str:
-    return "true" if bool(default if v is None else v) else "false"
+    """Serialize a JSON boolean-like value using Ayren's true/false syntax.
+
+    Specs often come from generated JSON and may contain the strings
+    ``"true"``/``"false"``.  Python's ``bool("false")`` is ``True``, which
+    silently produced an incorrect test.  Keep real booleans/numbers useful,
+    but reject unknown strings instead of guessing.
+    """
+    value = default if v is None else v
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == "true":
+            return "true"
+        if normalized == "false":
+            return "false"
+        raise ItxError("Логическое значение должно быть true или false: %r" % value)
+    return "true" if bool(value) else "false"
 
 
 def _choice(parent: ET.Element, spec: Dict[str, Any]) -> None:
@@ -770,7 +1054,12 @@ def build_xml(spec: Dict[str, Any]) -> Tuple[ET.Element, Dict[str, bytes]]:
         if not safe:
             raise ItxError("Изображение должно находиться в images/: %s" % archive_name)
         if isinstance(value, str) and Path(value).exists():
-            images[safe] = Path(value).read_bytes()
+            input_path = Path(value)
+            if input_path.is_symlink() or not input_path.is_file():
+                raise ItxError("Источник изображения должен быть обычным файлом: %s" % value)
+            if input_path.stat().st_size > MAX_MEMBER_BYTES:
+                raise ItxError("Изображение превышает лимит размера: %s" % value)
+            images[safe] = input_path.read_bytes()
         elif isinstance(value, str):
             try:
                 images[safe] = base64.b64decode(value, validate=True)
@@ -780,6 +1069,10 @@ def build_xml(spec: Dict[str, Any]) -> Tuple[ET.Element, Dict[str, bytes]]:
             images[safe] = bytes(value)
         else:
             raise ItxError("Недопустимое значение images[%s]." % archive_name)
+        if len(images[safe]) > MAX_MEMBER_BYTES:
+            raise ItxError("Изображение превышает лимит размера: %s" % archive_name)
+        if sum(len(item) for item in images.values()) > MAX_ARCHIVE_BYTES:
+            raise ItxError("Изображения превышают общий лимит размера теста")
     return root, images
 
 
@@ -843,6 +1136,125 @@ def build_test(args: Dict[str, Any]) -> Dict[str, Any]:
     return {"input": str(src_path), "output": str(output), "validation": validate_test(str(output))}
 
 
+def _question_summary(q: ET.Element, section_path: str, include_answers: bool) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "tag": q.get("tag"),
+        "type": q.get("type"),
+        "enabled": as_bool(q.get("enabled"), True),
+        "weight": q.get("weight"),
+        "section": section_path,
+        "images": sorted({img.get("src", "") for img in q.findall(".//img") if img.get("src")}),
+        "formulaCount": len(q.findall(".//formula")),
+        "hasScenario": bool(extract_script(q)),
+    }
+    if not include_answers:
+        return result
+    qtype = q.get("type")
+    if qtype == "select":
+        result["choices"] = [content_text(c.find("content")).strip() for c in q.findall("./choices/choice")]
+        result["correct"] = [content_text(c.find("content")).strip() for c in q.findall("./choices/choice") if c.get("correct") == "true"]
+    elif qtype == "input":
+        result["patterns"] = [p.attrib for p in q.findall("./patterns/pattern")]
+    elif qtype == "match":
+        result["pairs"] = [{"base": content_text(p.find("baseItem/content")).strip(), "match": content_text(p.find("matchingItem/content")).strip()} for p in q.findall("./pairs/pair")]
+        result["distractors"] = [content_text(d.find("content")).strip() for d in q.findall("./distractors/distractor")]
+    elif qtype == "order":
+        result["sequence"] = [content_text(i.find("content")).strip() for i in q.findall("./sequence/sequenceItem")]
+        result["distractors"] = [content_text(d.find("content")).strip() for d in q.findall("./distractors/distractor")]
+    elif qtype == "classify":
+        result["categories"] = [{"title": content_text(c.find("categoryTitle/content")).strip(), "items": [content_text(i.find("content")).strip() for i in c.findall("./categoryItems/categoryItem")]} for c in q.findall("./categories/category")]
+    return result
+
+
+def _section_summary(section: ET.Element, prefix: str, include_answers: bool) -> Dict[str, Any]:
+    title = section.get("title", "")
+    path = "%s / %s" % (prefix, title) if prefix else title
+    return {
+        "title": title,
+        "path": path,
+        "questions": [_question_summary(q, path, include_answers) for q in section.findall("./questions/question")],
+        "sections": [_section_summary(child, path, include_answers) for child in _section_children(section)],
+        "questionCount": len(section.findall(".//question")),
+    }
+
+
+def test_info(source: str, include_answers: bool = False) -> Dict[str, Any]:
+    """Return a compact authoring-oriented inventory of an .itx test."""
+    path, xml_bytes, files = read_itx(source)
+    root = parse_xml(xml_bytes)
+    questions = list(all_question_nodes(root))
+    images = sorted(n for n in files if safe_image_path(n))
+    source_data = sorted(n for n in files if safe_data_path(n))
+    profiles: List[Dict[str, Any]] = []
+    for profile in root.findall("./profiles/profile"):
+        item: Dict[str, Any] = {"title": profile.get("title", "")}
+        for name in ("questionSelection", "sessionOptions", "instantFeedback", "testResults", "markScale", "sectionProfile"):
+            node = profile.find(name)
+            if node is not None:
+                item[name] = {"attributes": dict(node.attrib), "children": len(list(node))}
+        profiles.append(item)
+    result: Dict[str, Any] = {
+        "path": str(path),
+        "version": root.get("version"),
+        "questionCount": len(questions),
+        "questionTypes": {t: sum(1 for q in questions if q.get("type") == t) for t in sorted(QUESTION_TYPES)},
+        "tags": sorted(q.get("tag") for q in questions if q.get("tag") is not None),
+        "images": images,
+        "sourceData": source_data,
+        "imageReferences": sorted({img.get("src", "") for img in root.findall(".//img") if img.get("src")}),
+        "formulaCount": len(root.findall(".//formula")),
+        "scenarioCount": sum(1 for q in questions if extract_script(q)),
+        "profiles": profiles,
+        "sections": [_section_summary(section, "", include_answers) for section in root.findall("./section")],
+    }
+    if include_answers:
+        result["questions"] = [_question_summary(q, "", True) for q in questions]
+    return result
+
+
+def unpack_test(source: str, destination: Optional[str] = None, overwrite: bool = False) -> Dict[str, Any]:
+    """Safely extract the validated test.xml and referenced image/data members."""
+    path, _, files = read_itx(source)
+    out = absolute_path(destination) if destination else path.with_suffix("")
+    if out.exists() and (out.is_symlink() or not out.is_dir()) :
+        raise ItxError("Каталог распаковки уже существует и небезопасен: %s" % out)
+    if out.exists() and not overwrite:
+        raise ItxError("Каталог распаковки уже существует; выберите другой путь или overwrite=true: %s" % out)
+    if any(p.is_symlink() for p in out.parents):
+        raise ItxError("Каталог распаковки находится через символическую ссылку")
+    out.mkdir(parents=True, exist_ok=True)
+    written: List[str] = []
+    for name, data in files.items():
+        safe = safe_archive_path(name)
+        if not safe:
+            raise ItxError("Небезопасное имя member: %s" % name)
+        target = out.joinpath(*safe.split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        checked_write_path(target, overwrite=True)
+        target.write_bytes(data)
+        written.append(safe)
+    return {"source": str(path), "output": str(out), "files": sorted(written), "fileCount": len(written)}
+
+
+def open_in_iren(source: str) -> Dict[str, Any]:
+    """Validate and open an .itx through the OS file association on Windows."""
+    path = absolute_path(source)
+    if path.is_symlink() or any(p.is_symlink() for p in path.parents):
+        raise ItxError("Открытие через символическую ссылку запрещено")
+    if path.suffix.lower() != ".itx" or not path.is_file():
+        raise ItxError("Ожидается существующий файл .itx")
+    report = validate_test(str(path))
+    if not report["valid"]:
+        raise ItxError("Айрен не будет надёжно открывать невалидный тест; сначала исправьте validate_test: %s" % json.dumps(report["findings"], ensure_ascii=False))
+    if os.name != "nt":
+        return {"opened": False, "supported": False, "path": str(path), "message": "Автоматическое открытие через ассоциацию доступно только в Windows."}
+    startfile = getattr(os, "startfile", None)
+    if startfile is None:
+        return {"opened": False, "supported": False, "path": str(path), "message": "В этой среде отсутствует Windows os.startfile."}
+    startfile(str(path))
+    return {"opened": True, "supported": True, "path": str(path), "validation": report}
+
+
 def render_html(source: str, output_dir: Optional[str] = None, overwrite: bool = False) -> Dict[str, Any]:
     path, xml_bytes, files = read_itx(source)
     root = parse_xml(xml_bytes)
@@ -900,15 +1312,18 @@ def render_html(source: str, output_dir: Optional[str] = None, overwrite: bool =
 body{font:16px/1.45 system-ui,Segoe UI,sans-serif;max-width:1100px;margin:0 auto;padding:24px;background:#f5f6f8;color:#20242b}.question{background:white;border:1px solid #d9dde5;border-radius:10px;padding:20px;margin:18px 0;box-shadow:0 2px 6px #0000000d}.prompt{font-size:1.05em;margin:12px 0 18px}.prompt img{max-width:100%%;max-height:360px;object-fit:contain;display:block;margin:10px 0}.choices li.correct{background:#e6f6e9;border-left:4px solid #198754}.choices li.negative{background:#fff2f2}.choices li{padding:7px 10px;margin:5px 0;border-radius:5px}.flag{font-size:.8em;color:#146c43;font-weight:600}.formula{font-family:Georgia,serif;background:#f0f1f3;padding:0 4px;border-radius:3px}.categories{display:flex;gap:14px;flex-wrap:wrap}.categories section{border:1px solid #ddd;padding:8px 14px;min-width:220px}table{border-collapse:collapse;width:100%%}td,th{border:1px solid #ccd2dc;padding:7px;text-align:left;vertical-align:top}small{color:#667085}</style></head><body><h1>%s</h1><p><small>Статический предпросмотр: правильные ответы подсвечены для проверки автора.</small></p>%s</body></html>""" % (title, title, "\n".join(cards))
     index = out / "index.html"
     index.write_text(doc, encoding="utf-8")
-    return {"source": str(path), "output": str(index), "questionCount": len(cards), "imageCount": len([n for n in files if n.startswith("images/") and not n.endswith("/")])}
+    return {"source": str(path), "output": str(index), "questionCount": len(cards), "imageCount": len([n for n in files if safe_image_path(n)])}
 
 
 TOOL_DEFS = [
-    {"name": "create_test", "description": "Создать и упаковать новый тест Айрен .itx из JSON-спецификации.", "inputSchema": {"type": "object", "properties": {"spec": {"description": "JSON-объект или путь к JSON-файлу", "type": ["object", "string"]}, "output": {"type": "string"}, "overwrite": {"type": "boolean", "default": False}}}},
-    {"name": "build_test", "description": "Собрать/перепаковать существующий .itx либо создать его из spec и проверить результат.", "inputSchema": {"type": "object", "properties": {"input_itx": {"type": "string"}, "spec": {"type": ["object", "string"]}, "output": {"type": "string"}, "overwrite": {"type": "boolean", "default": False}}}},
+    {"name": "create_test", "description": "Создать и упаковать новый тест Айрен .itx из JSON-спецификации.", "inputSchema": {"type": "object", "required": ["spec", "output"], "properties": {"spec": {"description": "JSON-объект или путь к JSON-файлу", "type": ["object", "string"]}, "output": {"type": "string"}, "overwrite": {"type": "boolean", "default": False}}}},
+    {"name": "build_test", "description": "Собрать/перепаковать существующий .itx либо создать его из spec и проверить результат.", "inputSchema": {"type": "object", "oneOf": [{"required": ["input_itx", "output"]}, {"required": ["spec", "output"]}], "properties": {"input_itx": {"type": "string"}, "spec": {"type": ["object", "string"]}, "output": {"type": "string"}, "overwrite": {"type": "boolean", "default": False}}}},
+    {"name": "test_info", "description": "Получить сводку по дереву секций, вопросам, профилям, изображениям, формулам, сценариям и при необходимости правильным ответам.", "inputSchema": {"type": "object", "required": ["itx"], "properties": {"itx": {"type": "string"}, "include_answers": {"type": "boolean", "default": False}}}},
+    {"name": "unpack_test", "description": "Безопасно распаковать test.xml и связанные изображения/исходные данные из .itx.", "inputSchema": {"type": "object", "required": ["itx", "output_dir"], "properties": {"itx": {"type": "string"}, "output_dir": {"type": "string"}, "overwrite": {"type": "boolean", "default": False}}}},
     {"name": "validate_formulas", "description": "Проверить inline-формулы, эталоны ответов, маркеры $(...) и сценарии.", "inputSchema": {"type": "object", "required": ["itx"], "properties": {"itx": {"type": "string"}}}},
-    {"name": "validate_test", "description": "Проверить ZIP/XML, вопросы, ответы, изображения, профили и формулы теста.", "inputSchema": {"type": "object", "required": ["itx"], "properties": {"itx": {"type": "string"}}}},
+    {"name": "validate_test", "description": "Проверить ZIP/XML, вопросы, ответы, изображения, профили и формулы теста.", "inputSchema": {"type": "object", "required": ["itx"], "properties": {"itx": {"type": "string"}, "check_near_dups": {"type": "boolean", "default": False}}}},
     {"name": "render_html", "description": "Сгенерировать автономный HTML-предпросмотр всех вопросов и изображений.", "inputSchema": {"type": "object", "required": ["itx"], "properties": {"itx": {"type": "string"}, "output_dir": {"type": "string"}, "overwrite": {"type": "boolean", "default": False}}}},
+    {"name": "open_in_iren", "description": "После проверки открыть валидный .itx через ассоциацию установленной программы Айрен в Windows.", "inputSchema": {"type": "object", "required": ["itx"], "properties": {"itx": {"type": "string"}}}},
 ]
 
 
@@ -917,19 +1332,31 @@ def call_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         return create_test(args)
     if name == "build_test":
         return build_test(args)
+    if name == "test_info":
+        return test_info(args["itx"], bool(args.get("include_answers", False)))
+    if name == "unpack_test":
+        return unpack_test(args["itx"], args.get("output_dir"), bool(args.get("overwrite", False)))
     if name == "validate_formulas":
         return validate_formulas(args["itx"])
     if name == "validate_test":
-        return validate_test(args["itx"])
+        return validate_test(args["itx"], bool(args.get("check_near_dups", False)))
     if name == "render_html":
         return render_html(args["itx"], args.get("output_dir"), bool(args.get("overwrite", False)))
+    if name == "open_in_iren":
+        return open_in_iren(args["itx"])
     raise ItxError("Неизвестный MCP tool: %s" % name)
 
 
 def serve_stdio() -> None:
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
     for line in sys.stdin:
         if not line.strip():
             continue
+        request_id = None
         try:
             request = json.loads(line)
             method = request.get("method")
@@ -941,7 +1368,7 @@ def serve_stdio() -> None:
                         sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32602, "message": "Unsupported MCP protocol version", "data": {"supported": sorted(SUPPORTED_PROTOCOL_VERSIONS), "requested": requested_version}}}, ensure_ascii=False) + "\n")
                         sys.stdout.flush()
                     continue
-                result = {"protocolVersion": requested_version, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "iren-itx", "version": __version__}, "instructions": "Tools create, validate, build, and preview Айрен .itx tests."}
+                result = {"protocolVersion": requested_version, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "iren-itx", "version": __version__}, "instructions": "Tools create, inspect, unpack, validate, preview, and optionally open Айрен .itx tests."}
             elif method == "notifications/initialized":
                 continue
             elif method == "ping":
@@ -963,7 +1390,7 @@ def serve_stdio() -> None:
                 sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}, ensure_ascii=False) + "\n")
                 sys.stdout.flush()
         except Exception as exc:
-            if "request_id" in locals() and request_id is not None:
+            if request_id is not None:
                 sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32000, "message": str(exc)}}, ensure_ascii=False) + "\n")
                 sys.stdout.flush()
 
@@ -971,11 +1398,13 @@ def serve_stdio() -> None:
 def cli() -> None:
     parser = argparse.ArgumentParser(description="Айрен ITX MCP/CLI")
     sub = parser.add_subparsers(dest="command")
-    for name in ("validate", "validate-formulas", "render", "create", "build"):
+    for name in ("validate", "validate-formulas", "info", "unpack", "render", "create", "build", "open"):
         command_parser = sub.add_parser(name)
         command_parser.add_argument("--itx")
         command_parser.add_argument("--output")
         command_parser.add_argument("--spec")
+        command_parser.add_argument("--answers", action="store_true")
+        command_parser.add_argument("--check-near-dups", action="store_true")
         command_parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--itx")
     parser.add_argument("--output")
@@ -986,15 +1415,21 @@ def cli() -> None:
         serve_stdio()
         return
     if args.command == "validate":
-        result = validate_test(args.itx)
+        result = validate_test(args.itx, args.check_near_dups)
     elif args.command == "validate-formulas":
         result = validate_formulas(args.itx)
+    elif args.command == "info":
+        result = test_info(args.itx, args.answers)
+    elif args.command == "unpack":
+        result = unpack_test(args.itx, args.output, args.overwrite)
     elif args.command == "render":
         result = render_html(args.itx, args.output, args.overwrite)
     elif args.command == "create":
         result = create_test({"spec": args.spec, "output": args.output, "overwrite": args.overwrite})
-    else:
+    elif args.command == "build":
         result = build_test({"input_itx": args.itx, "output": args.output, "overwrite": args.overwrite})
+    else:
+        result = open_in_iren(args.itx)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

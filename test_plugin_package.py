@@ -13,7 +13,7 @@ class PluginPackageTests(unittest.TestCase):
     def test_portable_manifest_and_components(self):
         manifest = self.read_json("plugin.json")
         self.assertEqual(manifest["name"], "iren-mcp")
-        self.assertEqual(manifest["version"], "0.1.3")
+        self.assertEqual(manifest["version"], "0.1.4")
         self.assertTrue((ROOT / "mcp.json").is_file())
         self.assertTrue((ROOT / "assets/iren-mcp.svg").is_file())
         onboarding = manifest["extensions"]["com.openai"]["onboardingSkill"]
